@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import functools
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from .config import get_config
 from . import director as _director
 from .creativity import ELEMENTS
 from .models import AMPLITUDES, AssetCard, Brief, CAMERA_TYPES, Mode, SPEEDS, ShotPlan, SubjectPlan
+from .shots import MIN_SHOT_MS
 from .textnorm import normalize
 
 
@@ -95,9 +97,43 @@ def _asset_digest(cards: dict[str, AssetCard], subjects: list[SubjectPlan]) -> s
     return "\n".join(lines) or "no references attached"
 
 
+def shot_timing_contract(duration_s: float, *, pinned_shots: int | None = None) -> str:
+    """Give the writer the validator's shot floor using the actual snapped render duration.
+
+    T12 validates the gaps between the start, every cut and the end. The last
+    permitted cut is rounded DOWN to a whole millisecond: a cut at this time
+    always leaves at least MIN_SHOT_MS, even when frames / fps has a fraction
+    of a millisecond. The model gets concrete arithmetic, not a new rule.
+    """
+    floor_s = MIN_SHOT_MS / 1000
+    last_ms = math.floor(duration_s * 1000) - MIN_SHOT_MS
+    last_cut = (f"{last_ms // 60000:02d}:"
+                f"{(last_ms // 1000) % 60:02d}.{last_ms % 1000:03d}")
+    text = (
+        f"Shot timing contract: the video ends at {duration_s:.3f}s. Every shot, "
+        f"INCLUDING the last, must last at least {floor_s:.3f}s. "
+        f"Place the first cut no earlier than {floor_s:.3f}s; separate every "
+        f"subsequent cut from the previous cut by at least {floor_s:.3f}s. "
+        f"If you use multiple shots, the last cut must be at or BEFORE {last_cut} "
+        f"and strictly before the video ends. A cut at the video's exact end "
+        f"creates a zero-duration final shot and is invalid. "
+    )
+    if pinned_shots is None:
+        return text + (
+            "Shot count is automatic: if an additional complete shot cannot fit, "
+            "use fewer [Shot N] blocks while preserving the requested action."
+        )
+    return text + (
+        f"The caller pinned exactly {pinned_shots} shots; preserve that count "
+        "and reposition cuts to satisfy every minimum duration."
+    )
+
+
 def fix_with_findings(backend: Backend, written: str, findings: list, *,
                       labels: tuple[str, ...] = (), sections: tuple[str, ...] = (),
-                      seed: int | None = None, thinking: bool = False) -> str:
+                      seed: int | None = None, thinking: bool = False,
+                      duration_s: float | None = None,
+                      pinned_shots: int | None = None) -> str:
     """Hand the model its own text plus the findings and ask for a surgical fix.
 
     The owner's idea, and better than the code repairers it replaces: a bespoke editor per failure
@@ -119,6 +155,22 @@ def fix_with_findings(backend: Backend, written: str, findings: list, *,
     rather than a decision.
     """
     numbered = "\n".join(f"{i}. [{f.rule}] {f.msg}" for i, f in enumerate(findings, 1))
+    timing_error = (duration_s is not None and
+                    any(f.rule in ("T12-cut-inside-the-floor", "T6-time-past-end")
+                        for f in findings))
+    may_merge = timing_error and pinned_shots is None
+    timing = ("\n" + shot_timing_contract(duration_s, pinned_shots=pinned_shots) + "\n"
+              if timing_error else "")
+    keep_shots = (not may_merge and
+                  not any(f.rule == "T11-shot-count-pinned" for f in findings))
+    if may_merge:
+        edit_guidance = (
+            "Correct the cut positions first. Only if another complete shot cannot "
+            "fit, merge the too-short shot into its neighbour without deleting "
+            "its action or inventing events. Do not otherwise re-plan. "
+        )
+    else:
+        edit_guidance = "Do not rewrite, do not shorten, do not re-plan — this is a correction pass, not a second draft. "
     inventory = ""
     if labels:
         inventory = (
@@ -129,12 +181,13 @@ def fix_with_findings(backend: Backend, written: str, findings: list, *,
     ask = (
         "Your brief failed mechanical verification. Below are the exact findings, then your text.\n\n"
         f"FINDINGS\n{numbered}\n"
+        f"{timing}"
         f"{inventory}\n"
         "Fix every finding and change nothing else. "
-        + ("" if any(f.rule == "T11-shot-count-pinned" for f in findings) else "Keep your shots, ")
-        + "Keep your camera moves, your "
-        "performance beats, your wording. Do not rewrite, do not shorten, do not re-plan — this is "
-        "a correction pass, not a second draft. Output the corrected "
+        + ("Keep your shots, " if keep_shots else "")
+        + "Keep your camera moves, your performance beats, your wording. "
+        + edit_guidance
+        + "Output the corrected "
         + (f"{len(sections)} sections ({', '.join(sections)})" if sections else "brief in full")
         + " and nothing else.\n\n"
         f"YOUR TEXT\n{written}"
@@ -773,7 +826,9 @@ def compose_brief(backend: Backend, brief: Brief, subjects: list[SubjectPlan],
         f"Request: {brief.intent}\n\n"
         f"Duration is exactly {target.effective_seconds:.3f} seconds; every cut time strictly less "
         f"than {int(target.effective_seconds // 60):02d}:"
-        f"{target.effective_seconds % 60:06.3f}, written MM:SS.mmm.\n\n"
+        f"{target.effective_seconds % 60:06.3f}, written MM:SS.mmm.\n"
+        + shot_timing_contract(target.effective_seconds, pinned_shots=brief.shots)
+        + "\n\n"
         # Three cases, and the middle one used to be told the wrong thing. A base mode with an
         # image attached has a real <Picture 1> and no definition lines at all, so keying the message
         # off the definition lines announced "nothing is attached" over a live reference.
