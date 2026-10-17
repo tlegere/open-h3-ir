@@ -494,7 +494,9 @@ def compile_brief(brief: Brief, *, backend: Backend | None = None,
                     # full-reference format during the pass meant to correct it.
                     candidate = fix_with_findings(backend, fixed.text, errors,
                                                   labels=inventory, sections=_sections_for(mode),
-                                                  seed=seed)
+                                                  seed=seed,
+                                                  duration_s=draft_plan.target.effective_seconds,
+                                                  pinned_shots=brief.shots)
                     timings[f"fix{rounds}_s"] = round(time.time() - t2, 2)
                     fixed, found, n_tokens = _verify(candidate)
                     mechanical_repairs += fixed.repairs
