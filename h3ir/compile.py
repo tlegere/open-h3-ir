@@ -422,7 +422,7 @@ def compile_brief(brief: Brief, *, backend: Backend | None = None,
                         if a.kind.value == "image" and a.path][:2] or None
                 scope = _scope(brief, draft_plan)
                 chosen_compose = compose_prompt or (
-                    "compose.v2.txt" if mode is Mode.REF2VA else "compose_base.v1.txt")
+                    "compose.v2.txt" if mode is Mode.REF2VA else "compose_base.v2.txt")
                 # The wiring's own facts travel with the ask: which mode's document shape this is,
                 # what the pictures are, and what the audio roles settle. Each of those was a
                 # question the model had to guess at, and each guess had a rule waiting for it.
